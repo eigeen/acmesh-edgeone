@@ -20,7 +20,7 @@
 一键安装：
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/eigeen/acmesh-edgeone/refs/heads/main/dnsapi/dns_edgeone.sh | sh
+curl -fsSL https://raw.githubusercontent.com/eigeen/acmesh-edgeone/refs/heads/main/install.sh | sh
 ```
 
 Git Clone 安装：
