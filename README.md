@@ -20,7 +20,14 @@
 一键安装：
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/eigeen/acmesh-edgeone/refs/heads/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/eigeen/acmesh-edgeone/main/install.sh | sh
+```
+
+如果使用 Fork 仓库：
+
+```sh
+EDGEONE_REPO_RAW_BASE="https://raw.githubusercontent.com/<you>/<repo>/main" \
+  curl -fsSL https://raw.githubusercontent.com/<you>/<repo>/main/install.sh | sh
 ```
 
 Git Clone 安装：
