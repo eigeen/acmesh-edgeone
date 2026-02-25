@@ -67,6 +67,7 @@ export EDGEONE_ZONE_ID="zone-xxxxxxxx"
 export EDGEONE_TOKEN=""   # 临时密钥的 SessionToken（可选）
 export EDGEONE_REGION=""  # 可选，通常可不填
 export EDGEONE_TTL="300"  # TXT TTL，默认 300
+export EDGEONE_TXT_OVERWRITE="1" # 创建 TXT 失败时是否覆盖同名 TXT（默认 1）
 ```
 
 签发示例：
@@ -92,6 +93,7 @@ acme.sh --issue --staging --debug 2 --dns dns_edgeone -d example.com
 ## 排错
 
 - `AuthFailure.SignatureFailure`：常见原因是 `EDGEONE_SECRET_ID/EDGEONE_SECRET_KEY` 不正确，或服务器时间不准（建议开启 NTP 同步）。
+- 如果你同时签发 `-d example.com -d "*.example.com"`，acme.sh 可能需要同名 TXT 同时存在多个值；此时建议设置 `EDGEONE_TXT_OVERWRITE=0`（前提是你的 DNS 支持同名多条 TXT）。
 
 ## 文件结构
 

@@ -29,6 +29,7 @@ dns_edgeone_add() {
   EDGEONE_TOKEN="${EDGEONE_TOKEN:-$(_readaccountconf_mutable EDGEONE_TOKEN)}"
   EDGEONE_REGION="${EDGEONE_REGION:-$(_readaccountconf_mutable EDGEONE_REGION)}"
   EDGEONE_TTL="${EDGEONE_TTL:-$(_readaccountconf_mutable EDGEONE_TTL)}"
+  EDGEONE_TXT_OVERWRITE="${EDGEONE_TXT_OVERWRITE:-$(_readaccountconf_mutable EDGEONE_TXT_OVERWRITE)}"
   EDGEONE_ZONE_ID="${EDGEONE_ZONE_ID:-$(_readdomainconf EDGEONE_ZONE_ID)}"
 
   if [ -z "$EDGEONE_SECRET_ID" ] || [ -z "$EDGEONE_SECRET_KEY" ]; then
@@ -38,11 +39,13 @@ dns_edgeone_add() {
   fi
 
   EDGEONE_TTL="${EDGEONE_TTL:-300}"
+  EDGEONE_TXT_OVERWRITE="${EDGEONE_TXT_OVERWRITE:-1}"
   _saveaccountconf_mutable EDGEONE_SECRET_ID "$EDGEONE_SECRET_ID"
   _saveaccountconf_mutable EDGEONE_SECRET_KEY "$EDGEONE_SECRET_KEY"
   _saveaccountconf_mutable EDGEONE_TOKEN "$EDGEONE_TOKEN"
   _saveaccountconf_mutable EDGEONE_REGION "$EDGEONE_REGION"
   _saveaccountconf_mutable EDGEONE_TTL "$EDGEONE_TTL"
+  _saveaccountconf_mutable EDGEONE_TXT_OVERWRITE "$EDGEONE_TXT_OVERWRITE"
 
   if ! _edgeone_get_zone "$fulldomain"; then
     return 1
@@ -50,14 +53,7 @@ dns_edgeone_add() {
   _debug EDGEONE_ZONE_ID "$EDGEONE_ZONE_ID"
 
   _info "Adding TXT record for $fulldomain"
-  if _edgeone_create_txt_record "$fulldomain" "$txtvalue" "$EDGEONE_TTL"; then
-    _info "Added, OK"
-    return 0
-  fi
-
-  _info "Create failed, checking if record already exists"
-  if _edgeone_txt_record_exists "$fulldomain" "$txtvalue"; then
-    _info "Already exists, OK"
+  if _edgeone_upsert_txt_record "$fulldomain" "$txtvalue" "$EDGEONE_TTL"; then
     return 0
   fi
 
@@ -178,6 +174,7 @@ _edgeone_create_txt_record() {
   if _contains "$response" "\"RecordId\""; then
     return 0
   fi
+  _err "EdgeOne unexpected CreateDnsRecord response: $response"
   return 1
 }
 
@@ -190,6 +187,49 @@ _edgeone_txt_record_exists() {
   fi
   record_ids=$(_edgeone_extract_record_ids "$response")
   if [ -n "$record_ids" ]; then
+    return 0
+  fi
+  return 1
+}
+
+_edgeone_upsert_txt_record() {
+  fulldomain=$1
+  txtvalue=$2
+  ttl=$3
+
+  if _edgeone_create_txt_record "$fulldomain" "$txtvalue" "$ttl"; then
+    _info "Added, OK"
+    return 0
+  fi
+
+  _info "Create failed, checking existing TXT records"
+  if ! _edgeone_describe_txt_records_by_name "$fulldomain"; then
+    return 1
+  fi
+
+  # If already present, OK.
+  _resp_compact=$(echo "$response" | tr -d ' ')
+  if _contains "$_resp_compact" "\"Content\":\"$txtvalue\""; then
+    _info "Already exists, OK"
+    return 0
+  fi
+
+  record_ids=$(_edgeone_extract_record_ids "$response")
+  if [ -z "$record_ids" ]; then
+    _err "No existing TXT record found to overwrite."
+    return 1
+  fi
+
+  if [ "${EDGEONE_TXT_OVERWRITE:-1}" = "0" ]; then
+    _err "EDGEONE_TXT_OVERWRITE=0, refusing to overwrite existing TXT record(s)."
+    return 1
+  fi
+
+  set -- $record_ids
+  rid=$1
+  _info "Overwriting TXT record (RecordId=$rid)"
+  if _edgeone_modify_record_content "$rid" "$txtvalue"; then
+    _info "Overwritten, OK"
     return 0
   fi
   return 1
@@ -231,6 +271,35 @@ _edgeone_describe_txt_records() {
 
   data="{\"ZoneId\":\"$EDGEONE_ZONE_ID\",\"Offset\":0,\"Limit\":1000,\"Filters\":[{\"Fuzzy\":false,\"Name\":\"name\",\"Values\":[\"$fulldomain\"]},{\"Fuzzy\":false,\"Name\":\"type\",\"Values\":[\"TXT\"]},{\"Fuzzy\":false,\"Name\":\"content\",\"Values\":[\"$txtvalue\"]}]}"
   if ! _edgeone_rest "DescribeDnsRecords" "$data"; then
+    return 1
+  fi
+  if _edgeone_has_error "$response"; then
+    _edgeone_log_error "$response"
+    return 1
+  fi
+  return 0
+}
+
+_edgeone_describe_txt_records_by_name() {
+  fulldomain=$1
+
+  data="{\"ZoneId\":\"$EDGEONE_ZONE_ID\",\"Offset\":0,\"Limit\":1000,\"Filters\":[{\"Fuzzy\":false,\"Name\":\"name\",\"Values\":[\"$fulldomain\"]},{\"Fuzzy\":false,\"Name\":\"type\",\"Values\":[\"TXT\"]}]}"
+  if ! _edgeone_rest "DescribeDnsRecords" "$data"; then
+    return 1
+  fi
+  if _edgeone_has_error "$response"; then
+    _edgeone_log_error "$response"
+    return 1
+  fi
+  return 0
+}
+
+_edgeone_modify_record_content() {
+  record_id=$1
+  txtvalue=$2
+
+  data="{\"ZoneId\":\"$EDGEONE_ZONE_ID\",\"DnsRecords\":[{\"RecordId\":\"$record_id\",\"Content\":\"$txtvalue\"}]}"
+  if ! _edgeone_rest "ModifyDnsRecords" "$data"; then
     return 1
   fi
   if _edgeone_has_error "$response"; then
@@ -305,25 +374,27 @@ _edgeone_rest() {
   date=$(date -u +"%Y-%m-%d")
   authorization=$(_edgeone_tc3_authorization "$action" "$data" "$timestamp" "$date")
 
-  export _H1="X-TC-Action: $action"
-  export _H2="X-TC-Version: $EDGEONE_Version"
-  export _H3="X-TC-Timestamp: $timestamp"
-  export _H4="Authorization: $authorization"
+  export _H1="Content-Type: application/json"
+  export _H2="X-TC-Action: $action"
+  export _H3="X-TC-Version: $EDGEONE_Version"
+  export _H4="X-TC-Timestamp: $timestamp"
+  export _H5="Authorization: $authorization"
 
   if [ "$EDGEONE_REGION" ]; then
-    export _H5="X-TC-Region: $EDGEONE_REGION"
+    export _H6="X-TC-Region: $EDGEONE_REGION"
     if [ "$EDGEONE_TOKEN" ]; then
-      export _H6="X-TC-Token: $EDGEONE_TOKEN"
+      export _H7="X-TC-Token: $EDGEONE_TOKEN"
     fi
   else
     if [ "$EDGEONE_TOKEN" ]; then
-      export _H5="X-TC-Token: $EDGEONE_TOKEN"
+      export _H6="X-TC-Token: $EDGEONE_TOKEN"
     fi
   fi
 
   _debug "EdgeOne action=$action"
   _debug2 "data" "$data"
-  response="$(_post "$data" "$EDGEONE_Api" "application/json" "POST")"
+  # Note: acme.sh _post() arg3 is not content-type. Set Content-Type via _H1.
+  response="$(_post "$data" "$EDGEONE_Api" "" "POST")"
   if [ "$?" != "0" ]; then
     _err "EdgeOne API request failed: $action"
     return 1
