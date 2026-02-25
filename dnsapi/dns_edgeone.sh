@@ -283,7 +283,7 @@ _edgeone_tc3_authorization() {
 
   signed_headers="content-type;host"
   hashed_payload=$(_edgeone_sha256 "$payload")
-  canonical_headers=$(printf "content-type:application/json; charset=utf-8\nhost:%s\n" "$EDGEONE_Host")
+  canonical_headers=$(printf "content-type:application/json\nhost:%s\n" "$EDGEONE_Host")
   canonical_request=$(printf "POST\n/\n\n%s\n%s\n%s" "$canonical_headers" "$signed_headers" "$hashed_payload")
   hashed_canonical_request=$(_edgeone_sha256 "$canonical_request")
   credential_scope="${date}/${EDGEONE_Service}/tc3_request"
@@ -305,26 +305,25 @@ _edgeone_rest() {
   date=$(date -u +"%Y-%m-%d")
   authorization=$(_edgeone_tc3_authorization "$action" "$data" "$timestamp" "$date")
 
-  export _H1="Content-Type: application/json; charset=utf-8"
-  export _H2="X-TC-Action: $action"
-  export _H3="X-TC-Version: $EDGEONE_Version"
-  export _H4="X-TC-Timestamp: $timestamp"
-  export _H5="Authorization: $authorization"
+  export _H1="X-TC-Action: $action"
+  export _H2="X-TC-Version: $EDGEONE_Version"
+  export _H3="X-TC-Timestamp: $timestamp"
+  export _H4="Authorization: $authorization"
 
   if [ "$EDGEONE_REGION" ]; then
-    export _H6="X-TC-Region: $EDGEONE_REGION"
+    export _H5="X-TC-Region: $EDGEONE_REGION"
     if [ "$EDGEONE_TOKEN" ]; then
-      export _H7="X-TC-Token: $EDGEONE_TOKEN"
+      export _H6="X-TC-Token: $EDGEONE_TOKEN"
     fi
   else
     if [ "$EDGEONE_TOKEN" ]; then
-      export _H6="X-TC-Token: $EDGEONE_TOKEN"
+      export _H5="X-TC-Token: $EDGEONE_TOKEN"
     fi
   fi
 
   _debug "EdgeOne action=$action"
   _debug2 "data" "$data"
-  response="$(_post "$data" "$EDGEONE_Api" "" "POST")"
+  response="$(_post "$data" "$EDGEONE_Api" "application/json" "POST")"
   if [ "$?" != "0" ]; then
     _err "EdgeOne API request failed: $action"
     return 1

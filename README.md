@@ -89,6 +89,10 @@ acme.sh --issue --staging --debug 2 --dns dns_edgeone -d example.com
 
 仓库内也提供了 DNS 相关接口的摘录（见 `docs/eo_dns_api.md`）。
 
+## 排错
+
+- `AuthFailure.SignatureFailure`：常见原因是 `EDGEONE_SECRET_ID/EDGEONE_SECRET_KEY` 不正确，或服务器时间不准（建议开启 NTP 同步）。
+
 ## 文件结构
 
 - `dnsapi/dns_edgeone.sh`：acme.sh DNS API 模块（`dns_edgeone_add` / `dns_edgeone_rm`）
