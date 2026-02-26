@@ -7,17 +7,102 @@ Options:
  EDGEONE_SECRET_ID TencentCloud SecretId
  EDGEONE_SECRET_KEY TencentCloud SecretKey
  EDGEONE_TOKEN Temporary session token (optional)
+ (Alt) TENCENTCLOUD_SECRET_ID TencentCloud SecretId
+ (Alt) TENCENTCLOUD_SECRET_KEY TencentCloud SecretKey
+ (Alt) TENCENTCLOUD_TOKEN Temporary session token (optional)
  EDGEONE_ZONE_ID EdgeOne ZoneId (recommended; otherwise best-effort auto-detect)
  EDGEONE_REGION TencentCloud region (optional)
- EDGEONE_TTL TXT record TTL seconds (optional; default 300)
+ EDGEONE_TTL TXT record TTL seconds (optional; default 120)
+ EDGEONE_CONTENT_TYPE HTTP Content-Type used for signing/request (optional; default "application/json; charset=utf-8")
+ EDGEONE_HOST HTTP Host used for signing/request (optional; default "teo.tencentcloudapi.com")
+ EDGEONE_SIGN_XTC_ACTION Set to 1 to include x-tc-action in signature (optional; default 0)
 '
 
-EDGEONE_Api="https://teo.tencentcloudapi.com"
-EDGEONE_Host="teo.tencentcloudapi.com"
+EDGEONE_DefaultHost="teo.tencentcloudapi.com"
 EDGEONE_Service="teo"
 EDGEONE_Version="2022-09-01"
+EDGEONE_DefaultContentType="application/json; charset=utf-8"
 
 ########  Public functions #####################
+
+_edgeone_trim_secret() {
+  # Remove surrounding quotes and CR/LF (common when copying from Windows/clipboard).
+  # Keep other characters intact.
+  printf "%s" "$1" | tr -d '\r\n' | tr -d '"'
+}
+
+# Prefer acme.sh built-ins (same style as docs/dns_tencent.sh) for portability across distros/openssl.
+_edgeone_sha256() {
+  if type _digest >/dev/null 2>&1; then
+    printf %b "$@" | _digest sha256 hex
+  else
+    printf %b "$@" | openssl dgst -sha256 | sed 's/^.* //' | tr -d '\n'
+  fi
+}
+
+_edgeone_hmac_sha256() {
+  k=$1
+  shift
+  if type _hmac >/dev/null 2>&1 && type _hex_dump >/dev/null 2>&1; then
+    hex_key=$(printf %b "$k" | _hex_dump | tr -d ' ')
+    printf %b "$@" | _hmac sha256 "$hex_key" hex
+  else
+    printf %b "$@" | openssl dgst -sha256 -mac hmac -macopt key:"$k" | sed 's/^.* //' | tr -d '\n'
+  fi
+}
+
+_edgeone_hmac_sha256_hexkey() {
+  k=$1
+  shift
+  if type _hmac >/dev/null 2>&1; then
+    printf %b "$@" | _hmac sha256 "$k" hex
+  else
+    printf %b "$@" | openssl dgst -sha256 -mac hmac -macopt hexkey:"$k" | sed 's/^.* //' | tr -d '\n'
+  fi
+}
+
+_edgeone_signature_v3() {
+  service=$1
+  action=$2
+  payload=${3:-'{}'}
+  timestamp=${4:-$(date -u +%s)}
+  content_type=${5:-$EDGEONE_DefaultContentType}
+
+  domain="$EDGEONE_HOST"
+  secretId=${EDGEONE_SECRET_ID:-'tencent-cloud-secret-id'}
+  secretKey=${EDGEONE_SECRET_KEY:-'tencent-cloud-secret-key'}
+
+  algorithm='TC3-HMAC-SHA256'
+  date=$(date -u -d "@$timestamp" +%Y-%m-%d 2>/dev/null)
+  [ -z "$date" ] && date=$(date -u -r "$timestamp" +%Y-%m-%d)
+
+  canonicalUri='/'
+  canonicalQuery=''
+
+  signedHeaders='content-type;host'
+  canonicalHeaders="content-type:$content_type\nhost:$domain\n"
+  if _edgeone_should_sign_xtc_action; then
+    if type _lower_case >/dev/null 2>&1; then
+      action_lc=$(echo "$action" | _lower_case)
+    else
+      action_lc=$(_edgeone_to_lower "$action")
+    fi
+    signedHeaders='content-type;host;x-tc-action'
+    canonicalHeaders="content-type:$content_type\nhost:$domain\nx-tc-action:$action_lc\n"
+  fi
+
+  canonicalRequest="POST\n$canonicalUri\n$canonicalQuery\n$canonicalHeaders\n$signedHeaders\n$(_edgeone_sha256 "$payload")"
+
+  credentialScope="$date/$service/tc3_request"
+  stringToSign="$algorithm\n$timestamp\n$credentialScope\n$(_edgeone_sha256 "$canonicalRequest")"
+
+  secretDate=$(_edgeone_hmac_sha256 "TC3$secretKey" "$date")
+  secretService=$(_edgeone_hmac_sha256_hexkey "$secretDate" "$service")
+  secretSigning=$(_edgeone_hmac_sha256_hexkey "$secretService" 'tc3_request')
+  signature=$(_edgeone_hmac_sha256_hexkey "$secretSigning" "$stringToSign")
+
+  echo "$algorithm Credential=$secretId/$credentialScope, SignedHeaders=$signedHeaders, Signature=$signature"
+}
 
 # Usage: dns_edgeone_add _acme-challenge.www.domain.com "txtvalue"
 dns_edgeone_add() {
@@ -29,8 +114,18 @@ dns_edgeone_add() {
   EDGEONE_TOKEN="${EDGEONE_TOKEN:-$(_readaccountconf_mutable EDGEONE_TOKEN)}"
   EDGEONE_REGION="${EDGEONE_REGION:-$(_readaccountconf_mutable EDGEONE_REGION)}"
   EDGEONE_TTL="${EDGEONE_TTL:-$(_readaccountconf_mutable EDGEONE_TTL)}"
+  EDGEONE_CONTENT_TYPE="${EDGEONE_CONTENT_TYPE:-$(_readaccountconf_mutable EDGEONE_CONTENT_TYPE)}"
+  EDGEONE_HOST="${EDGEONE_HOST:-$(_readaccountconf_mutable EDGEONE_HOST)}"
   EDGEONE_TXT_OVERWRITE="${EDGEONE_TXT_OVERWRITE:-$(_readaccountconf_mutable EDGEONE_TXT_OVERWRITE)}"
   EDGEONE_ZONE_ID="${EDGEONE_ZONE_ID:-$(_readdomainconf EDGEONE_ZONE_ID)}"
+
+  EDGEONE_SECRET_ID="${EDGEONE_SECRET_ID:-$TENCENTCLOUD_SECRET_ID}"
+  EDGEONE_SECRET_KEY="${EDGEONE_SECRET_KEY:-$TENCENTCLOUD_SECRET_KEY}"
+  EDGEONE_TOKEN="${EDGEONE_TOKEN:-${TENCENTCLOUD_TOKEN:-$TENCENTCLOUD_SESSION_TOKEN}}"
+
+  EDGEONE_SECRET_ID=$(_edgeone_trim_secret "$EDGEONE_SECRET_ID")
+  EDGEONE_SECRET_KEY=$(_edgeone_trim_secret "$EDGEONE_SECRET_KEY")
+  EDGEONE_TOKEN=$(_edgeone_trim_secret "$EDGEONE_TOKEN")
 
   if [ -z "$EDGEONE_SECRET_ID" ] || [ -z "$EDGEONE_SECRET_KEY" ]; then
     _err "You didn't specify EdgeOne/TencentCloud credentials."
@@ -38,13 +133,17 @@ dns_edgeone_add() {
     return 1
   fi
 
-  EDGEONE_TTL="${EDGEONE_TTL:-300}"
+  EDGEONE_TTL="${EDGEONE_TTL:-120}"
+  EDGEONE_CONTENT_TYPE="${EDGEONE_CONTENT_TYPE:-$EDGEONE_DefaultContentType}"
+  EDGEONE_HOST="${EDGEONE_HOST:-$EDGEONE_DefaultHost}"
   EDGEONE_TXT_OVERWRITE="${EDGEONE_TXT_OVERWRITE:-1}"
   _saveaccountconf_mutable EDGEONE_SECRET_ID "$EDGEONE_SECRET_ID"
   _saveaccountconf_mutable EDGEONE_SECRET_KEY "$EDGEONE_SECRET_KEY"
   _saveaccountconf_mutable EDGEONE_TOKEN "$EDGEONE_TOKEN"
   _saveaccountconf_mutable EDGEONE_REGION "$EDGEONE_REGION"
   _saveaccountconf_mutable EDGEONE_TTL "$EDGEONE_TTL"
+  _saveaccountconf_mutable EDGEONE_CONTENT_TYPE "$EDGEONE_CONTENT_TYPE"
+  _saveaccountconf_mutable EDGEONE_HOST "$EDGEONE_HOST"
   _saveaccountconf_mutable EDGEONE_TXT_OVERWRITE "$EDGEONE_TXT_OVERWRITE"
 
   if ! _edgeone_get_zone "$fulldomain"; then
@@ -70,7 +169,17 @@ dns_edgeone_rm() {
   EDGEONE_SECRET_KEY="${EDGEONE_SECRET_KEY:-$(_readaccountconf_mutable EDGEONE_SECRET_KEY)}"
   EDGEONE_TOKEN="${EDGEONE_TOKEN:-$(_readaccountconf_mutable EDGEONE_TOKEN)}"
   EDGEONE_REGION="${EDGEONE_REGION:-$(_readaccountconf_mutable EDGEONE_REGION)}"
+  EDGEONE_CONTENT_TYPE="${EDGEONE_CONTENT_TYPE:-$(_readaccountconf_mutable EDGEONE_CONTENT_TYPE)}"
+  EDGEONE_HOST="${EDGEONE_HOST:-$(_readaccountconf_mutable EDGEONE_HOST)}"
   EDGEONE_ZONE_ID="${EDGEONE_ZONE_ID:-$(_readdomainconf EDGEONE_ZONE_ID)}"
+
+  EDGEONE_SECRET_ID="${EDGEONE_SECRET_ID:-$TENCENTCLOUD_SECRET_ID}"
+  EDGEONE_SECRET_KEY="${EDGEONE_SECRET_KEY:-$TENCENTCLOUD_SECRET_KEY}"
+  EDGEONE_TOKEN="${EDGEONE_TOKEN:-${TENCENTCLOUD_TOKEN:-$TENCENTCLOUD_SESSION_TOKEN}}"
+
+  EDGEONE_SECRET_ID=$(_edgeone_trim_secret "$EDGEONE_SECRET_ID")
+  EDGEONE_SECRET_KEY=$(_edgeone_trim_secret "$EDGEONE_SECRET_KEY")
+  EDGEONE_TOKEN=$(_edgeone_trim_secret "$EDGEONE_TOKEN")
 
   if [ -z "$EDGEONE_SECRET_ID" ] || [ -z "$EDGEONE_SECRET_KEY" ]; then
     _err "You didn't specify EdgeOne/TencentCloud credentials."
@@ -192,14 +301,49 @@ _edgeone_txt_record_exists() {
   return 1
 }
 
+_edgeone_record_id_conf_key() {
+  fulldomain=$1
+  txtvalue=$2
+  _k=$(_edgeone_sha256 "$(printf "%s|%s|%s" "$EDGEONE_ZONE_ID" "$fulldomain" "$txtvalue")")
+  printf "%s" "EDGEONE_RecordId_${_k}"
+}
+
+_edgeone_extract_first_record_id() {
+  _r="$1"
+  printf "%s" "$_r" | _egrep_o "\"RecordId\"[ ]*:[ ]*\"[^\"]*\"" | _head_n 1 | cut -d : -f 2 | tr -d ' "'
+}
+
+_edgeone_response_error_code() {
+  _r="$1"
+  printf "%s" "$_r" | _egrep_o "\"Code\"[ ]*:[ ]*\"[^\"]*\"" | _head_n 1 | cut -d : -f 2 | tr -d ' "'
+}
+
 _edgeone_upsert_txt_record() {
   fulldomain=$1
   txtvalue=$2
   ttl=$3
 
   if _edgeone_create_txt_record "$fulldomain" "$txtvalue" "$ttl"; then
+    rid=$(_edgeone_extract_first_record_id "$response")
+    if [ "$rid" ]; then
+      _k=$(_edgeone_record_id_conf_key "$fulldomain" "$txtvalue")
+      _savedomainconf "$_k" "$rid"
+    fi
     _info "Added, OK"
     return 0
+  fi
+
+  # If Create failed due to CNAME conflict, there's nothing to overwrite: user must remove/disable the CNAME.
+  err_code=$(_edgeone_response_error_code "$response")
+  if [ "$err_code" = "InvalidParameterValue.ConflictWithRecord" ]; then
+    _err "EdgeOne TXT record conflicts with an existing CNAME for $fulldomain."
+    _err "Please delete/disable the CNAME record at $fulldomain and retry, or use ACME DNS alias (CNAME delegation) to another zone."
+    return 1
+  fi
+
+  if [ "${EDGEONE_TXT_OVERWRITE:-1}" = "0" ]; then
+    _err "Create failed and EDGEONE_TXT_OVERWRITE=0, not attempting to detect/overwrite existing TXT record(s)."
+    return 1
   fi
 
   _info "Create failed, checking existing TXT records"
@@ -220,11 +364,6 @@ _edgeone_upsert_txt_record() {
     return 1
   fi
 
-  if [ "${EDGEONE_TXT_OVERWRITE:-1}" = "0" ]; then
-    _err "EDGEONE_TXT_OVERWRITE=0, refusing to overwrite existing TXT record(s)."
-    return 1
-  fi
-
   set -- $record_ids
   rid=$1
   _info "Overwriting TXT record (RecordId=$rid)"
@@ -238,6 +377,22 @@ _edgeone_upsert_txt_record() {
 _edgeone_delete_txt_records() {
   fulldomain=$1
   txtvalue=$2
+
+  # Prefer deleting by RecordId saved at add-time (avoids requiring Describe permission).
+  _k=$(_edgeone_record_id_conf_key "$fulldomain" "$txtvalue")
+  saved_rid=$(_readdomainconf "$_k")
+  if [ "$saved_rid" ]; then
+    data="{\"ZoneId\":\"$EDGEONE_ZONE_ID\",\"RecordIds\":[\"$saved_rid\"]}"
+    if _edgeone_rest "DeleteDnsRecords" "$data"; then
+      if _edgeone_has_error "$response"; then
+        _edgeone_log_error "$response"
+        return 1
+      fi
+      _cleardomainconf "$_k"
+      return 0
+    fi
+    return 1
+  fi
 
   if ! _edgeone_describe_txt_records "$fulldomain" "$txtvalue"; then
     return 1
@@ -328,20 +483,12 @@ _edgeone_log_error() {
   _debug2 response "$_r"
 }
 
-_edgeone_sha256() {
-  printf "%s" "$1" | openssl dgst -sha256 | sed 's/^.* //' | tr -d '\n'
+_edgeone_to_lower() {
+  printf "%s" "$1" | tr '[:upper:]' '[:lower:]'
 }
 
-_edgeone_hmac_sha256() {
-  _key="$1"
-  _msg="$2"
-  printf "%s" "$_msg" | openssl dgst -sha256 -mac HMAC -macopt key:"$_key" | sed 's/^.* //' | tr -d '\n'
-}
-
-_edgeone_hmac_sha256_hexkey() {
-  _hexkey="$1"
-  _msg="$2"
-  printf "%s" "$_msg" | openssl dgst -sha256 -mac HMAC -macopt hexkey:"$_hexkey" | sed 's/^.* //' | tr -d '\n'
+_edgeone_should_sign_xtc_action() {
+  [ "${EDGEONE_SIGN_XTC_ACTION:-0}" = "1" ]
 }
 
 _edgeone_tc3_authorization() {
@@ -349,52 +496,82 @@ _edgeone_tc3_authorization() {
   payload=$2
   timestamp=$3
   date=$4
+  content_type=$5
 
-  signed_headers="content-type;host"
-  hashed_payload=$(_edgeone_sha256 "$payload")
-  canonical_headers=$(printf "content-type:application/json\nhost:%s\n" "$EDGEONE_Host")
-  canonical_request=$(printf "POST\n/\n\n%s\n%s\n%s" "$canonical_headers" "$signed_headers" "$hashed_payload")
-  hashed_canonical_request=$(_edgeone_sha256 "$canonical_request")
+  token=$(_edgeone_signature_v3 "$EDGEONE_Service" "$action" "$payload" "$timestamp" "$content_type")
+  printf "%s" "$token"
+}
+
+_edgeone_debug_sign() {
+  action=$1
+  payload=$2
+  timestamp=$3
+  date=$4
+  content_type=$5
+
+  if [ "${EDGEONE_DEBUG_SIGN:-0}" != "1" ]; then
+    return 0
+  fi
+
+  # Reconstruct the same canonical request used by signature_v3() for easier troubleshooting.
+  signed_headers='content-type;host'
+  canonical_headers="content-type:$content_type\nhost:$EDGEONE_HOST\n"
+  if _edgeone_should_sign_xtc_action; then
+    if type _lower_case >/dev/null 2>&1; then
+      action_lc=$(echo "$action" | _lower_case)
+    else
+      action_lc=$(_edgeone_to_lower "$action")
+    fi
+    signed_headers='content-type;host;x-tc-action'
+    canonical_headers="content-type:$content_type\nhost:$EDGEONE_HOST\nx-tc-action:$action_lc\n"
+  fi
+
+  canonical_request="POST\n/\n\n$canonical_headers\n$signed_headers\n$(_edgeone_sha256 "$payload")"
   credential_scope="${date}/${EDGEONE_Service}/tc3_request"
-  string_to_sign=$(printf "TC3-HMAC-SHA256\n%s\n%s\n%s" "$timestamp" "$credential_scope" "$hashed_canonical_request")
+  string_to_sign="TC3-HMAC-SHA256\n$timestamp\n$credential_scope\n$(_edgeone_sha256 "$canonical_request")"
 
   secret_date=$(_edgeone_hmac_sha256 "TC3${EDGEONE_SECRET_KEY}" "$date")
   secret_service=$(_edgeone_hmac_sha256_hexkey "$secret_date" "$EDGEONE_Service")
   secret_signing=$(_edgeone_hmac_sha256_hexkey "$secret_service" "tc3_request")
   signature=$(_edgeone_hmac_sha256_hexkey "$secret_signing" "$string_to_sign")
 
-  printf "%s" "TC3-HMAC-SHA256 Credential=${EDGEONE_SECRET_ID}/${credential_scope}, SignedHeaders=${signed_headers}, Signature=${signature}"
+  _debug "EdgeOne canonical_request" "$canonical_request"
+  _debug "EdgeOne string_to_sign" "$string_to_sign"
+  _debug "EdgeOne signature" "$signature"
 }
 
 _edgeone_rest() {
   action=$1
   data=$2
 
+  EDGEONE_HOST="${EDGEONE_HOST:-$EDGEONE_DefaultHost}"
+  EDGEONE_CONTENT_TYPE="${EDGEONE_CONTENT_TYPE:-$EDGEONE_DefaultContentType}"
   timestamp=$(date -u +%s)
   date=$(date -u +"%Y-%m-%d")
-  authorization=$(_edgeone_tc3_authorization "$action" "$data" "$timestamp" "$date")
-
-  export _H1="Content-Type: application/json"
-  export _H2="X-TC-Action: $action"
-  export _H3="X-TC-Version: $EDGEONE_Version"
-  export _H4="X-TC-Timestamp: $timestamp"
-  export _H5="Authorization: $authorization"
-
-  if [ "$EDGEONE_REGION" ]; then
-    export _H6="X-TC-Region: $EDGEONE_REGION"
-    if [ "$EDGEONE_TOKEN" ]; then
-      export _H7="X-TC-Token: $EDGEONE_TOKEN"
-    fi
-  else
-    if [ "$EDGEONE_TOKEN" ]; then
-      export _H6="X-TC-Token: $EDGEONE_TOKEN"
-    fi
-  fi
+  authorization=$(_edgeone_tc3_authorization "$action" "$data" "$timestamp" "$date" "$EDGEONE_CONTENT_TYPE")
+  _edgeone_debug_sign "$action" "$data" "$timestamp" "$date" "$EDGEONE_CONTENT_TYPE"
 
   _debug "EdgeOne action=$action"
+  _debug "EdgeOne content-type" "$EDGEONE_CONTENT_TYPE"
   _debug2 "data" "$data"
-  # Note: acme.sh _post() arg3 is not content-type. Set Content-Type via _H1.
-  response="$(_post "$data" "$EDGEONE_Api" "" "POST")"
+  if [ "$EDGEONE_TOKEN" ]; then
+    # Temporary credentials require X-TC-Token.
+    # Keep within _H1.._H5 for compatibility with older acme.sh.
+    _H1="X-TC-Action: $action"
+    _H2="X-TC-Version: $EDGEONE_Version"
+    _H3="X-TC-Timestamp: $timestamp"
+    _H4="Authorization: $authorization"
+    _H5="X-TC-Token: $EDGEONE_TOKEN"
+  else
+    # Explicitly set Host to avoid HTTP/2 authority/host edge cases during signature validation.
+    _H1="Host: $EDGEONE_HOST"
+    _H2="X-TC-Action: $action"
+    _H3="X-TC-Version: $EDGEONE_Version"
+    _H4="X-TC-Timestamp: $timestamp"
+    _H5="Authorization: $authorization"
+  fi
+
+  response="$(_post "$data" "https://$EDGEONE_HOST" "" "POST" "$EDGEONE_CONTENT_TYPE")"
   if [ "$?" != "0" ]; then
     _err "EdgeOne API request failed: $action"
     return 1

@@ -76,6 +76,12 @@ export EDGEONE_TXT_OVERWRITE="1" # 创建 TXT 失败时是否覆盖同名 TXT（
 acme.sh --issue --dns dns_edgeone -d example.com -d "*.example.com"
 ```
 
+如果遇到 DNS 传播慢/解析链路不一致（例如 CA 校验时报 NXDOMAIN），建议增加等待时间：
+
+```sh
+acme.sh --issue --dns dns_edgeone --dnssleep 300 -d example.com -d "*.example.com"
+```
+
 调试建议：
 
 ```sh
@@ -94,6 +100,7 @@ acme.sh --issue --staging --debug 2 --dns dns_edgeone -d example.com
 
 - `AuthFailure.SignatureFailure`：常见原因是 `EDGEONE_SECRET_ID/EDGEONE_SECRET_KEY` 不正确，或服务器时间不准（建议开启 NTP 同步）。
 - 如果你同时签发 `-d example.com -d "*.example.com"`，acme.sh 可能需要同名 TXT 同时存在多个值；此时建议设置 `EDGEONE_TXT_OVERWRITE=0`（前提是你的 DNS 支持同名多条 TXT）。
+- `DNS problem: NXDOMAIN looking up TXT for _acme-challenge...`：通常是 DNS 传播/缓存/解析链路导致 CA 查不到 TXT；重试时加 `--dnssleep 300`（或更大），并确认域名 NS 已正确接入 EdgeOne。
 
 ## 文件结构
 
